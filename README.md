@@ -1,24 +1,18 @@
 # Genome Annotation using MAKER
-*this tutorial is ever changing and was designed to annotate the horsefly genome, tabanid hinellus. 
-*It has since been updated to be more general and work with varying levels of starting data.
-*This tutorial is designed to run in MPI mode.
+*this tutorial is ever changing and was designed to annotate the the red flour beetle genome, Trbiolum castaneum. 
 
-Other tutorials and resources used to make this tutorial  
-https://darencard.net/blog/2017-05-16-maker-genome-annotation/  
-https://www.ncbi.nlm.nih.gov/genome/annotation_euk/process/  
-http://weatherby.genetics.utah.edu/MAKER/wiki/index.php/MAKER_Tutorial_for_WGS_Assembly_and_Annotation_Winter_School_2018  
-https://bioinformaticsworkbook.org/dataAnalysis/GenomeAnnotation/Intro_To_Maker.html#gsc.tab=0  
 
 ## Software & Data
 
 #### Software prerequisites:
 1. [RepeatModeler](http://www.repeatmasker.org/RepeatModeler/) and [RepeatMasker](http://www.repeatmasker.org/RMDownload.html) with all dependencies (I used NCBI BLAST) and [RepBase](http://www.girinst.org/repbase/) (version used was 20150807).
-2. MAKER MPI version 2.31.8 (though any other version 2 releases should be okay).
+2. MAKER version 2.31.8 
 3. [Augustus](http://bioinf.uni-greifswald.de/augustus/) version 3.2.3.
 4. [BUSCO](http://busco.ezlab.org/) version 2.0.1.
 5. [SNAP](http://korflab.ucdavis.edu/software.html) version 2006-07-28.
 6. [BEDtools](https://bedtools.readthedocs.io/en/latest/) version 2.17.0.
-
+7. Exonerate
+8. GlimmerHMM
 
 ```bash
 MY_GENOME=genome_assembly.fasta # ideally you have removed contamination from this assembly and don't have a lot of small contigs.
@@ -26,94 +20,52 @@ MY_TRANSCRIPTOME=transcriptome_assembly.fasta # optional but recommended, also c
 MY_PROTEINS=proteome.fasta # Try uniprot_sprot.fasta
 ```
 
-### Setup Step 1: Train gene models with BUSCO --long option, this will be used later
-```bash
-lineage=aves_odb10
-species=chicken
-sample=
-busco -l $lineage -m genome --augustus_species $species  -c 24 -i $GENOME -o busco-$species-$sample --long
-```
+export PATH=/tools/RepeatModeler-2.0.3:$PATH
+export PERL5LIB=/softwares/perl5.30.0/lib/
 
-### Setup Step 2. *De Novo* Repeat Identification
-The first, and very important, step to genome annotation is identifying repetitive content. Existing libraries from Repbase or from internal efforts are great, but it is also important to identify repeats *de novo* from your reference genome using `RepeatModeler`. This is pretty easy to do and normally only takes a couple days using 8-12 cores.
+### BuildDatabase -name genome_db -engine ncbi $MY_GENOME
 
-http://weatherby.genetics.utah.edu/MAKER/wiki/index.php/Repeat_Library_Construction--Basic
+RepeatModeler -pa 32 -engine ncbi -database genome_db 2>&1 | tee repeatmodeler.log
 
-http://www.repeatmasker.org/RepeatModeler/
+REPEATMASKER_LIB_DIR=/tools/RepeatMasker/Libraries
 
-```bash
-BuildDatabase -name genome_db -engine $MY_GENOME
+REPEATMASKER_MATRICES_DIR=/tools/RepeatMasker/Matrices
 
-RepeatModeler -pa 32 #number of cores \
--engine ncbi #optional, as ncbi is the default engine \
--database genome_db 2>&1 | tee repeatmodeler.log
-```
+export PATH=/RepeatMasker/:$PATH
 
-The output from this that we will use is called `consensi.fa.classified`
 
-###### Download RepBase data for close relative and concatenate with tabanid repeat model.
+mkdir repeatMasker-tcas_model
 
-RepBase - https://www.girinst.org/server/RepBase/index.php # you need a subscription now. NOT COOL.
+RepeatMasker -pa 24 -e ncbi -gccalc -lib consensi.fa.classified -dir repeatMasker-tcas_model $MY_GENOME
 
-#### Full Repeat Annotation (optional)
-Depending on the species, the *de novo* library can be fed right into MAKER. Here we do more complex repeat identification.
-
-```
-mkdir repeatMasker-tabanid_model
-
-RepeatMasker -pa 24 #number of cores /
--e ncbi #engine /
--gccalc #calculate GC content /
--lib combined-conseni.fa.classified #concatenated consensi.fa.classified and RepBase files \
--dir repeatMasker-model #output directory \
- $MY_GENOME #assembly file
-```
-
-Then the masked FASTA from this search can be used as input for the next search, using the `arthropoda` library from Repbase.
-
-```bash
 mkdir repeatMasker-output
 
-# The below command needs to be adjusted
-repeat_species=arthropoda
+RepeatMasker -pa 24 -e ncbi -gccalc -a -dir repeatMasker-output $MY_GENOME
 
-RepeatMasker -pa 24 \
--e ncbi \
--gccalc \
--a #creates an alignment files that cab be used with jbrowse \
--s #slow search (more sensitive, but slower)
--species $repeat_species #species name must be in the NCBI Taxonomy Database\
--dir repeatMasker-output #output directory\
-$MY_GENOME #assembly file
-```
-
-Combine all data to produce the final repeat annotations
-```bash
 mkdir full_mask
+
 gunzip repeatMasker-output/*.cat.gz 
-cat repeatMasker-output/*.cat.gz> full_mask/full_mask.cat
-cd full_mask
-ProcessRepeats -species arthropoda full_mask.cat
-```
 
-In order to feed these repeats into MAKER properly, we must separate out the complex repeats (more info on this below).
+cp repeatMasker-output/*.cat > ../full_mask/full_mask.cat
 
-```bash
-# create GFF3
-rmOutToGFF3.pl full_mask/full_mask.out > full_mask/full_mask.out.gff3
-# isolate complex repeats
-grep -v -e "Satellite" -e ")n" -e "-rich" full_mask.out.gff3 \
-  > full_mask.out.complex.gff3
-# reformat to work with MAKER
-cat full_mask.out.complex.gff3 | \
-  perl -ane '$id; if(!/^\#/){@F = split(/\t/, $_); chomp $F[-1];$id++; $F[-1] .= "\;ID=$id"; $_ = join("\t", @F)."\n"} print $_' \
-  > full_mask.out.complex.reformat.gff3
-```
-Now we have the prerequesite data for running MAKER.
+cd ~/final_maker/full_mask
 
-```bash
-complex_repeats=full_mask.out.complex.reformat.gff3
-# note: maker will do the simple repeats
+ProcessRepeats full_mask.cat
+
+##################################
+
+### create GFF3
+/tools/RepeatMasker/util/rmOutToGFF3.pl ~/full_mask/full_mask.out > full_mask/full_mask.out.gff3
+
+
+### isolate complex repeats
+grep -v -e "Satellite" -e "-rich" full_mask.out.gff3 > full_mask.out.complex.gff3
+
+### reformat to work with MAKER
+cat full_mask.out.complex.gff3 | perl -ane '$id; if(!/^\#/){@F = split(/\t/, $_); chomp $F[-1];$id++; $F[-1] .= "\;ID=$id"; $_ = join("\t", @F)."\n"} print $_' > full_mask.out.complex.reformat.gff3
+
+complex_repeats=~/full_mask/full_mask.out.complex.reformat.gff3
+
 ```
 
 ## Initial MAKER Analysis
